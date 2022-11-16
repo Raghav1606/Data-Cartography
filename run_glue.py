@@ -46,7 +46,6 @@ from transformers import (
 # from transformers.utils import get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 
-
 logger = get_logger(__name__)
 
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/text-classification/requirements.txt")
@@ -213,9 +212,11 @@ def main():
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
     # in the environment
-    accelerator = (
-        Accelerator(log_with=args.report_to, logging_dir=args.output_dir) if args.with_tracking else Accelerator()
-    )
+    # accelerator = (
+    #     Accelerator(log_with=args.report_to, logging_dir=args.output_dir) if args.with_tracking else Accelerator()
+    #
+    accelerator = Accelerator()
+    device = accelerator.device
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -338,9 +339,9 @@ def main():
     # Some models have set the order of the labels to use, so let's make sure we do use it.
     label_to_id = None
     if (
-        model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
-        and args.task_name is not None
-        and not is_regression
+            model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
+            and args.task_name is not None
+            and not is_regression
     ):
         # Some have all caps in their config, some don't.
         label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
@@ -390,7 +391,7 @@ def main():
             batched=True,
             # 得把这行改掉：
             # 以SST2为例，这里会把 ['sentence', 'label', 'idx'] 给去掉（不用担心label，因为上面已经新建了一个labels列）
-            # remove_columns=raw_datasets["train"].column_names,  
+            # remove_columns=raw_datasets["train"].column_names,
             # 改为：
             remove_columns=[c for c in raw_datasets["train"].column_names if c != 'idx'],  # 保留idx，其他的可以去掉
             desc="Running tokenizer on dataset",
@@ -519,7 +520,7 @@ def main():
             resume_step = int(training_difference.replace("step_", ""))
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
-    
+
     # ============================ Training Loop ============================
     for epoch in range(starting_epoch, args.num_train_epochs):
         if accelerator.is_main_process:
@@ -530,10 +531,10 @@ def main():
             log_path = f'dy_log/{args.task_name}/{args.model_name_or_path}/training_dynamics/'
             if not os.path.exists(log_path):
                 os.mkdir(log_path)
-        
-        accelerator.wait_for_everyone() # 只在 main process 里面创建文件夹，然后让其他 process 等待 main process 创建完毕
+
+        accelerator.wait_for_everyone()  # 只在 main process 里面创建文件夹，然后让其他 process 等待 main process 创建完毕
         log_path = f'dy_log/{args.task_name}/{args.model_name_or_path}/training_dynamics/'
-        print('-*-*-*- ',log_path, os.path.exists(log_path),accelerator.device)
+        print('-*-*-*- ', log_path, os.path.exists(log_path), accelerator.device)
 
         model.train()
         if args.with_tracking:
@@ -545,7 +546,7 @@ def main():
                     completed_steps += 1
                     continue
             # batch中包含了idx字段，这里需要去除
-            batch = {k:v for k,v in batch.items() if k != 'idx'} 
+            batch = {k: v for k, v in batch.items() if k != 'idx'}
             outputs = model(**batch)
             loss = outputs.loss
             # We keep track of the loss at each epoch
@@ -562,7 +563,7 @@ def main():
 
             if isinstance(checkpointing_steps, int):
                 if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
+                    output_dir = f"step_{completed_steps}"
                     if args.output_dir is not None:
                         output_dir = os.path.join(args.output_dir, output_dir)
                     accelerator.save_state(output_dir)
@@ -572,51 +573,50 @@ def main():
         # ------------------ Recording Training Dynamics --------------------
         # 在每一个epoch之后，对train set所有样本再过一遍，记录dynamics
         # 每个epoch单独一个文件
-        logger.info('---------- Recording Training Dynamics (Epoch %s) -----------'%epoch)
+        logger.info('---------- Recording Training Dynamics (Epoch %s) -----------' % epoch)
         training_dynamics = []
         all_ids = []
         for step, batch in enumerate(tqdm(train_dataloader)):
             # print('- - - - - - - - - -  ',len(batch['idx']), accelerator.device)
-            idx_list = batch['idx']#.tolist()
-            label_list = batch['labels']#.tolist()
-            batch = {k:v for k,v in batch.items() if k != 'idx'} 
-            logits_list = model(**batch).logits#.tolist() # [[],[],[],...] batch_size个[]
+            idx_list = batch['idx']  # .tolist()
+            label_list = batch['labels']  # .tolist()
+            batch = {k: v for k, v in batch.items() if k != 'idx'}
+            logits_list = model(**batch).logits  # .tolist() # [[],[],[],...] batch_size个[]
             # 这里的关键：通过 gather 把每个 GPU上的结果合并
             # 由于在使用多卡训练时，不同卡可能存在样本的重复，同一个卡也会对最后一个batch进行补齐，也会样本重复
             # 使用 gather 的话，就可以按照原来的分配方式，逆着组合回去，就不用你自己处理了
             # gather 之后的，在每个卡上，下述变量里包含的数量，都等同于只使用单卡进行训练时的数量
             # 所以下面的for训练执行完之后，training_dynamics里就包含了全部样本，你在写入文件时，记住只在一个 process 中写入
-            idx_list, label_list, logits_list = accelerator.gather((idx_list, label_list, logits_list)) 
+            idx_list, label_list, logits_list = accelerator.gather((idx_list, label_list, logits_list))
             # print('idx_list', idx_list.shape, accelerator.device)
             # print('label_list', label_list.shape, accelerator.device)
-            
+
             for idx, label, logits in zip(idx_list.tolist(), label_list.tolist(), logits_list.tolist()):
-                if idx in all_ids: # 由于 data_loader 可能会对最后一个 batch 进行补全，所以这里要去掉重复的样本
+                if idx in all_ids:  # 由于 data_loader 可能会对最后一个 batch 进行补全，所以这里要去掉重复的样本
                     continue
                 all_ids.append(idx)
-                record = {'guid': idx, 'logits_epoch_%s'%epoch: logits, 'gold': label, 'device':str(accelerator.device)}
+                record = {'guid': idx, 'logits_epoch_%s' % epoch: logits, 'gold': label,
+                          'device': str(accelerator.device)}
                 training_dynamics.append(record)
-        print(len(all_ids),len(list(set(all_ids))),str(accelerator.device))
+        print(len(all_ids), len(list(set(all_ids))), str(accelerator.device))
 
-        print('---- Num of training_dynamics: ',len(training_dynamics),' Device: ', str(accelerator.device))
+        print('---- Num of training_dynamics: ', len(training_dynamics), ' Device: ', str(accelerator.device))
         if accelerator.is_main_process:
-            assert os.path.exists(log_path),log_path
-            writer = open(log_path + f'dynamics_epoch_{epoch}.jsonl', 'w') 
+            assert os.path.exists(log_path), log_path
+            writer = open(log_path + f'dynamics_epoch_{epoch}.jsonl', 'w')
             for record in training_dynamics:
                 writer.write(json.dumps(record) + "\n")
             logger.info(f'Epoch {epoch} Saved to [{log_path}]')
             writer.close()
         accelerator.wait_for_everyone()
-        
+
         # ------------------------------------------------------------------------
-
-
 
         # evaluation (validation set)
         model.eval()
         samples_seen = 0
         for step, batch in enumerate(eval_dataloader):
-            batch = {k:v for k,v in batch.items() if k != 'idx'} # 需不需要设置device ？
+            batch = {k: v for k, v in batch.items() if k != 'idx'}  # 需不需要设置device ？
             with torch.no_grad():
                 outputs = model(**batch)
             predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
@@ -666,7 +666,6 @@ def main():
             accelerator.save_state(output_dir)
     # ============================ End Training Loop ============================
 
-
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
@@ -688,6 +687,7 @@ def main():
 
         model.eval()
         for step, batch in enumerate(eval_dataloader):
+            batch = {k: v for k, v in batch.items() if k != 'idx'}
             outputs = model(**batch)
             predictions = outputs.logits.argmax(dim=-1)
             metric.add_batch(
